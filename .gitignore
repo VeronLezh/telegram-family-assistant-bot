@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Env / secrets
+.env
+service-account.json
+
+# Runtime data
+*.json
+!requirements.txt
+.DS_Store
