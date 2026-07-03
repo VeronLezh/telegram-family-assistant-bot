@@ -37,7 +37,7 @@
 | Таблицы | Google Sheets API |
 | Healthcheck | Flask, поднимается в отдельном daemon-потоке |
 | Интеграции | Make.com (webhook) |
-| Деплой | Heroku (worker dyno, `Procfile`) |
+| Деплой | Render (worker, `Procfile`) + UptimeRobot пингует `/health`, чтобы инстанс не засыпал |
 
 ## Архитектура
 
