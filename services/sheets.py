@@ -25,6 +25,29 @@ def _get_service():
     return build("sheets", "v4", credentials=credentials)
 
 
+def ensure_tab(tab: str) -> bool:
+    """Создаёт вкладку, если её ещё нет: без неё write_sheet падает молча (в лог),
+    и данные остаются только в локальном файле, который не переживёт рестарт сервиса
+    (на Render диск эфемерный)."""
+    if not SHEETS_ID:
+        return False
+    try:
+        service = _get_service()
+        meta = service.spreadsheets().get(spreadsheetId=SHEETS_ID).execute()
+        titles = {s["properties"]["title"] for s in meta.get("sheets", [])}
+        if tab in titles:
+            return True
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SHEETS_ID,
+            body={"requests": [{"addSheet": {"properties": {"title": tab}}}]}
+        ).execute()
+        logging.info(f"Создана вкладка Google Sheets: {tab}")
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка создания вкладки Google Sheets ({tab}): {e}")
+        return False
+
+
 def read_sheet(tab: str) -> any:
     if not SHEETS_ID:
         return None

@@ -7,13 +7,15 @@ import aiohttp
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import MAKE_WEBHOOK_URL, MOSCOW_TZ, USER_ID_TO_NAME
+from config import MAKE_WEBHOOK_URL, MEMORY_FACT_MAX_CHARS, MOSCOW_TZ, USER_ID_TO_NAME
 from services.ai import (
     ai_answer, transcribe_voice, analyze_image,
     parse_reminder_request, parse_training_delete, parse_wishlist_add, groq_client
 )
+from services.memory import append_core_line
 from reminders.personal import add_smart_reminder
 from reminders.wishlist import add_wishlist_item
+from handlers.expenses import try_handle_expense_amount, try_handle_kids_expense_amount
 
 REMINDER_TRIGGERS = ["напомни", "напомнить", "поставь напоминание", "remind me"]
 TRAINING_DELETE_TRIGGERS = ["удали тренировку", "убери тренировку", "удалить тренировку", "убрать тренировку"]
@@ -21,6 +23,8 @@ WISHLIST_TRIGGERS = [
     "хочу на день рождения", "хочу на др", "хочу в подарок", "хочу получить в подарок",
     "добавь в список желаний", "добавь в вишлист", "запиши в список желаний"
 ]
+# Только начало фразы: «запомни …» в середине предложения — обычно не команда, а речь.
+MEMORY_TRIGGERS = ["запомни", "запиши в память", "имей в виду"]
 
 
 def _is_reminder_request(text: str) -> bool:
@@ -38,11 +42,29 @@ def _is_wishlist_request(text: str) -> bool:
     return any(kw in t for kw in WISHLIST_TRIGGERS)
 
 
+def _extract_memory_fact(text: str) -> str | None:
+    """«запомни, что я не ем мясо» → «я не ем мясо». Без LLM: префикс дешевле и предсказуемее."""
+    t = text.strip()
+    low = t.lower()
+    for kw in MEMORY_TRIGGERS:
+        if low.startswith(kw):
+            fact = t[len(kw):].lstrip(" ,:.—-")
+            if fact.lower().startswith("что "):
+                fact = fact[4:]
+            return fact.strip() or None
+    return None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id if update.effective_chat else None
     text = update.message.text if update.message else None
     first_name = update.effective_user.first_name if update.effective_user else None
     user_id = update.effective_user.id if update.effective_user else None
+
+    if text and user_id and await try_handle_expense_amount(update, text, user_id):
+        return
+    if text and user_id and await try_handle_kids_expense_amount(update, text, user_id):
+        return
 
     message_data = {
         "chat_id": chat_id,
@@ -121,6 +143,29 @@ async def _process_text_intent(update: Update, text: str, chat_id: int, user_id:
         except Exception as e:
             logging.error(f"Ошибка добавления в список желаний: {e}")
             await update.message.reply_text("⚠️ Ошибка при добавлении в список желаний.")
+        return
+
+    fact = _extract_memory_fact(text)
+    if fact:
+        try:
+            result = append_core_line(user_id, fact)
+            if not result.core:
+                await update.message.reply_text("⚠️ Не могу сохранить — для тебя память отключена.")
+                return
+            if result.duplicate:
+                await update.message.reply_text("🧠 Это я уже помню.")
+                return
+            # Показываем то, что реально легло в ядро, а не исходный текст: факт мог быть обрезан.
+            reply = f"🧠 Запомнил: {result.core.splitlines()[-1].lstrip('- ')}"
+            if result.truncated:
+                reply += f"\n\n⚠️ Факт длинный, сохранил первые {MEMORY_FACT_MAX_CHARS} символов."
+            if result.dropped:
+                reply += (f"\n\n⚠️ Ядро заполнено, вытеснено самых старых строк: "
+                          f"{result.dropped}. Посмотреть — /core")
+            await update.message.reply_text(reply)
+        except Exception as e:
+            logging.error(f"Ошибка записи в ядро памяти: {e}")
+            await update.message.reply_text("⚠️ Ошибка при сохранении в память.")
         return
 
     try:

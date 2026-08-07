@@ -9,11 +9,18 @@ from telegram.ext import (
     CommandHandler, InlineQueryHandler, MessageHandler, filters
 )
 
-from config import BOT_TOKEN, ADMIN_USERS, CHAT_IDS_ALL, USER_ANNA
+from config import (
+    BOT_TOKEN, ADMIN_USERS, CHAT_IDS_ALL, USER_ANNA,
+    MEMORY_USERS, MEMORY_CORE_MAX_CHARS, MEMORY_FACT_MAX_CHARS
+)
 from handlers.admin import (
     admin_help, help_command,
     admin_help_schedule, admin_help_trainings, admin_help_reminder, admin_help_make,
-    admin_help_ai, admin_help_broadcast, admin_help_wishlist
+    admin_help_ai, admin_help_broadcast, admin_help_wishlist, admin_help_expenses
+)
+from handlers.expenses import (
+    expenses_menu, expenses_button_handler,
+    kids_expenses_menu, kids_expenses_button_handler
 )
 from handlers.menu import menu, menu_button_handler
 from handlers.messages import handle_message, handle_voice_message, handle_photo_message
@@ -35,6 +42,7 @@ from reminders.jobs import (
 )
 from server import run_flask
 from services.ai import ai_answer, reset_history
+from services.memory import get_core, append_core_line, clear_core
 from services.calendar import get_calendar_events
 
 
@@ -51,6 +59,7 @@ async def start(update: Update, context):
         "• Отвечаю с прогнозом и советом по одежде на слово Погода\n"
         "• Добавлю события в google календарь\n"
         "• Добавлю траты по детям и пришлю отчет по запросу\n"
+        "• Запишу траты по ЖКХ и связи\n"
         "• Добавлю покупки в список\n"
     )
     if update.message:
@@ -84,6 +93,46 @@ async def reset_command(update: Update, context):
     user_id = update.effective_user.id if update.effective_user else None
     reset_history(user_id)
     await update.message.reply_text("🔄 История разговора сброшена. Начнём с чистого листа!")
+
+
+async def core_command(update: Update, context):
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id not in MEMORY_USERS:
+        await update.message.reply_text("⛔️ Для тебя память отключена.")
+        return
+
+    arg = " ".join(context.args) if context.args else ""
+
+    if arg.lower() == "clear":
+        clear_core(user_id)
+        await update.message.reply_text("🧹 Память очищена.")
+        return
+
+    if arg:
+        result = append_core_line(user_id, arg)
+        if result.duplicate:
+            await update.message.reply_text("🧠 Это я уже помню.")
+            return
+        reply = f"🧠 Запомнил: {result.core.splitlines()[-1].lstrip('- ')}"
+        if result.truncated:
+            reply += f"\n\n⚠️ Факт длинный, сохранил первые {MEMORY_FACT_MAX_CHARS} символов."
+        if result.dropped:
+            reply += f"\n\n⚠️ Ядро заполнено, вытеснено самых старых строк: {result.dropped}."
+        await update.message.reply_text(reply)
+        return
+
+    core = get_core(user_id)
+    if not core:
+        await update.message.reply_text(
+            "🧠 Память пока пустая.\n\n"
+            "Добавить: /core я не ем мясо\n"
+            "Или просто напиши: запомни, что я не ем мясо"
+        )
+        return
+    await update.message.reply_text(
+        f"🧠 Что я о тебе помню ({len(core)}/{MEMORY_CORE_MAX_CHARS} символов):\n\n{core}\n\n"
+        "Добавить: /core <факт>\nОчистить: /core clear"
+    )
 
 
 async def broadcast_command(update: Update, context):
@@ -161,13 +210,18 @@ def main():
     application.add_handler(CommandHandler("addreminder", addreminder_command))
     application.add_handler(CommandHandler("wishlist", wishlist_command))
     application.add_handler(CommandHandler("reset", reset_command))
+    application.add_handler(CommandHandler("core", core_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("addtraining", addtraining_command))
     application.add_handler(CommandHandler("removetraining", removetraining_command))
+    application.add_handler(CommandHandler("expenses", expenses_menu))
+    application.add_handler(CommandHandler("kidsexpenses", kids_expenses_menu))
 
     application.add_handler(CallbackQueryHandler(menu_button_handler, pattern="^menu_"))
     application.add_handler(CallbackQueryHandler(schedule_button_handler, pattern="^schedule_"))
     application.add_handler(CallbackQueryHandler(trainings_button_handler, pattern="^trainings_"))
+    application.add_handler(CallbackQueryHandler(expenses_button_handler, pattern="^expense_"))
+    application.add_handler(CallbackQueryHandler(kids_expenses_button_handler, pattern="^kidsexpense_"))
     application.add_handler(CallbackQueryHandler(admin_help, pattern="^admin_help$"))
     application.add_handler(CallbackQueryHandler(admin_help_schedule, pattern="^admin_help_schedule$"))
     application.add_handler(CallbackQueryHandler(admin_help_trainings, pattern="^admin_help_trainings$"))
@@ -176,6 +230,7 @@ def main():
     application.add_handler(CallbackQueryHandler(admin_help_ai, pattern="^admin_help_ai$"))
     application.add_handler(CallbackQueryHandler(admin_help_broadcast, pattern="^admin_help_broadcast$"))
     application.add_handler(CallbackQueryHandler(admin_help_wishlist, pattern="^admin_help_wishlist$"))
+    application.add_handler(CallbackQueryHandler(admin_help_expenses, pattern="^admin_help_expenses$"))
 
     application.add_handler(InlineQueryHandler(inline_query_handler))
     application.add_handler(ChosenInlineResultHandler(chosen_inline_result_handler))

@@ -2,6 +2,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from config import CHAT_IDS_ALL, CALENDAR_PERSONAL_USERS, CALENDAR_FAMILY_USERS
+from handlers.expenses import expenses_menu, kids_expenses_menu
 from services.calendar import get_calendar_events
 
 
@@ -9,11 +10,12 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inline_keyboard = [
         [InlineKeyboardButton("📚 Расписание уроков", callback_data="menu_schedule")],
         [InlineKeyboardButton("🏋️ Тренировки и доп.занятия детей", callback_data="menu_trainings")],
+        [InlineKeyboardButton("💸 ЖКХ и связь", callback_data="menu_expenses")],
+        [InlineKeyboardButton("👧 Траты на детей", callback_data="menu_kids_expenses")],
     ]
     if update.effective_user and update.effective_user.id in CHAT_IDS_ALL:
         inline_keyboard.append([InlineKeyboardButton("📅 Личный календарь", callback_data="menu_calendar_personal")])
         inline_keyboard.append([InlineKeyboardButton("👨‍👩‍👧‍👦 Семейный календарь", callback_data="menu_calendar_family")])
-    inline_keyboard.append([InlineKeyboardButton("🤖 чат с AI", callback_data="menu_ai")])
     inline_reply_markup = InlineKeyboardMarkup(inline_keyboard)
 
     if update.message:
@@ -60,8 +62,10 @@ async def menu_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await calendar_callback(query, context, calendar_type="personal")
         elif data == "menu_calendar_family":
             await calendar_callback(query, context, calendar_type="family")
-        elif data == "menu_ai":
-            await query.edit_message_text("🤖 Чат с AI: просто напишите сообщение боту, и он ответит вам!")
+        elif data == "menu_expenses":
+            await expenses_menu(update, context)
+        elif data == "menu_kids_expenses":
+            await kids_expenses_menu(update, context)
         elif data == "menu_back":
             await menu(update, context)
     except Exception as e:

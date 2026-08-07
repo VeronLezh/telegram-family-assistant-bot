@@ -15,6 +15,7 @@ def _help_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔗 Команды Make.com", callback_data="admin_help_make")],
         [InlineKeyboardButton("🤖 AI и голос", callback_data="admin_help_ai")],
         [InlineKeyboardButton("🎁 Список желаний", callback_data="admin_help_wishlist")],
+        [InlineKeyboardButton("💸 ЖКХ и связь", callback_data="admin_help_expenses")],
     ]
     if is_admin:
         buttons += [
@@ -113,7 +114,12 @@ async def admin_help_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Анализ фото:\n"
         "Отправь фото — AI опишет что на нём.\n"
         "С подписью: отправь фото + вопрос в подписи.\n\n"
-        "Сброс истории разговора:\n"
+        "Постоянная память:\n"
+        "запомни, что я не ем мясо — бот сохранит факт навсегда\n"
+        "/core — посмотреть, что бот о тебе помнит\n"
+        "/core <факт> — добавить\n"
+        "/core clear — очистить\n\n"
+        "Сброс истории разговора (память при этом остаётся):\n"
         "/reset"
     )
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(BACK_TO_HELP))
@@ -132,6 +138,21 @@ async def admin_help_wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE
         "/wishlist Виктор — список одного человека\n\n"
         f"За {WISHLIST_REMINDER_DAYS} дн. до дня рождения бот сам пришлёт список остальным "
         "(или идеи от AI, если список пуст)."
+    )
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(BACK_TO_HELP))
+
+
+async def admin_help_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    text = (
+        "💸 ЖКХ и связь\n\n"
+        "Записать трату:\n"
+        "/expenses — открыть меню, выбрать категорию (ЖКХ / Интернет / Телефон-связь) "
+        "и написать сумму в ответ.\n"
+        "Также доступно из /menu → «💸 ЖКХ и связь».\n\n"
+        "Отдельно от трекера трат на детей (см. раздел Make.com) — эти суммы уходят "
+        "в отдельную вкладку таблицы."
     )
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(BACK_TO_HELP))
 
@@ -160,7 +181,8 @@ async def admin_help_make(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💸 Записать трату по детям:\n"
         "Дети <Имя> <на что> <сумма>\n"
         "→ Дети Галя секция 1500\n"
-        "→ Дети Виктор учебники 800\n\n"
+        "→ Дети Виктор учебники 800\n"
+        "Также можно через кнопки: /kidsexpenses или /menu → «👧 Траты на детей»\n\n"
         "📊 Получить отчёт по тратам:\n"
         "Отчет\n\n"
         "🌤 Прогноз погоды:\n"

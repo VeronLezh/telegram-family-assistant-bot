@@ -5,7 +5,8 @@ import re
 
 from groq import Groq
 
-from config import GROQ_API_KEY, AI_PROMPTS_BY_USER
+from config import GROQ_API_KEY, AI_PROMPTS_BY_USER, MINOR_USERS
+from services.memory import get_core
 
 try:
     groq_client = Groq(api_key=GROQ_API_KEY)
@@ -16,6 +17,42 @@ except Exception as e:
 MAX_HISTORY = 10
 conversation_history: dict[int, list] = {}
 
+# Жёсткое правило безопасности — часть системного промпта КАЖДОГО пользователя,
+# не зависит от AI_PROMPTS_BY_USER, чтобы его нельзя было случайно ослабить правкой промпта.
+SAFETY_RULE = (
+    "\n\nЖёсткое правило (не нарушай ни при каких обстоятельствах и ни в шутку): "
+    "никогда не упоминай порнографию, секс, наркотики, алкоголь и любой контент 18+, "
+    "даже если пользователь сам заговорит об этом или попросит пошутить на эту тему."
+)
+MINOR_SAFETY_RULE = (
+    " Это ребёнок. Общайся бережно: никаких взрослых тем, пошлости, мата и сарказма на грани — "
+    "только лёгкий, добрый юмор."
+)
+# Telegram-клиент получает эти сообщения без parse_mode, поэтому markdown-разметка
+# (**, ###, дефисы-списки и т.п.) не рендерится, а прилипает к тексту как есть.
+FORMATTING_RULE = (
+    "\n\nНе используй markdown-разметку: никаких **жирного**, ###заголовков, `код`-блоков "
+    "и списков через * или -. Пиши обычным текстом, для акцентов и структуры используй "
+    "эмодзи, переносы строк и нумерацию цифрами (1. 2. 3.)."
+)
+
+
+def _system_prompt(user_id: int) -> str:
+    """Промпт пользователя + его ядро памяти (постоянные факты и предпочтения)."""
+    prompt = AI_PROMPTS_BY_USER.get(user_id, "Ты полезный и дружелюбный ассистент.")
+    prompt += SAFETY_RULE
+    prompt += FORMATTING_RULE
+    if user_id in MINOR_USERS:
+        prompt += MINOR_SAFETY_RULE
+    core = get_core(user_id)
+    if core:
+        prompt += (
+            "\n\n## Что ты знаешь об этом человеке\n"
+            f"{core}\n"
+            "Опирайся на эти факты, но не перечисляй их без надобности."
+        )
+    return prompt
+
 
 def _strip_think(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
@@ -23,30 +60,12 @@ def _strip_think(text: str) -> str:
     return text.strip()
 
 
-def _no_think(messages: list) -> list:
-    """Отключает thinking-mode у Qwen3 через токен /no_think в последнем user-сообщении."""
-    result = []
-    for msg in reversed(messages):
-        if msg["role"] == "user" and not result:
-            content = msg["content"]
-            if isinstance(content, str):
-                result.insert(0, {**msg, "content": f"/no_think\n{content}"})
-            else:
-                result.insert(0, msg)
-        else:
-            result.insert(0, msg)
-    return result
-
-
 async def ai_answer(user_text: str, user_id: int) -> str:
     try:
         if not groq_client:
             return "⚠️ AI сервис временно недоступен."
 
-        system_prompt = AI_PROMPTS_BY_USER.get(
-            user_id,
-            "Ты полезный и дружелюбный ассистент."
-        )
+        system_prompt = _system_prompt(user_id)
 
         history = conversation_history.setdefault(user_id, [])
         history.append({"role": "user", "content": user_text})
@@ -55,10 +74,11 @@ async def ai_answer(user_text: str, user_id: int) -> str:
             history[:] = history[-MAX_HISTORY:]
 
         response = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=_no_think([{"role": "system", "content": system_prompt}] + history),
+            model="qwen/qwen3.6-27b",
+            messages=[{"role": "system", "content": system_prompt}] + history,
             temperature=0.6,
-            max_tokens=400
+            max_tokens=400,
+            reasoning_effort="none"
         )
 
         assistant_reply = _strip_think(response.choices[0].message.content)
@@ -83,8 +103,8 @@ async def parse_reminder_request(text: str, now_str: str) -> dict | None:
         if not groq_client:
             return None
         response = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=_no_think([
+            model="qwen/qwen3.6-27b",
+            messages=[
                 {
                     "role": "system",
                     "content": (
@@ -96,9 +116,10 @@ async def parse_reminder_request(text: str, now_str: str) -> dict | None:
                     )
                 },
                 {"role": "user", "content": text}
-            ]),
+            ],
             temperature=0.1,
-            max_tokens=100
+            max_tokens=100,
+            reasoning_effort="none"
         )
         content = _strip_think(response.choices[0].message.content)
         match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
@@ -118,7 +139,7 @@ async def analyze_image(image_path: str, prompt: str, user_id: int) -> str:
         with open(image_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        system_prompt = AI_PROMPTS_BY_USER.get(user_id, "Ты полезный и дружелюбный ассистент.")
+        system_prompt = _system_prompt(user_id)
 
         response = groq_client.chat.completions.create(
             model="qwen/qwen3.6-27b",
@@ -128,12 +149,13 @@ async def analyze_image(image_path: str, prompt: str, user_id: int) -> str:
                     "role": "user",
                     "content": [
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                        {"type": "text", "text": f"/no_think\n{prompt}"},
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ],
             temperature=0.6,
-            max_tokens=1500
+            max_tokens=1500,
+            reasoning_effort="none"
         )
 
         reply = _strip_think(response.choices[0].message.content)
@@ -157,8 +179,8 @@ async def parse_training_delete(text: str, trainings: dict) -> dict | None:
             return None
         trainings_str = json.dumps(trainings, ensure_ascii=False)
         response = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=_no_think([
+            model="qwen/qwen3.6-27b",
+            messages=[
                 {
                     "role": "system",
                     "content": (
@@ -170,9 +192,10 @@ async def parse_training_delete(text: str, trainings: dict) -> dict | None:
                     )
                 },
                 {"role": "user", "content": text}
-            ]),
+            ],
             temperature=0.1,
-            max_tokens=100
+            max_tokens=100,
+            reasoning_effort="none"
         )
         content = _strip_think(response.choices[0].message.content)
         match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
@@ -189,8 +212,8 @@ async def parse_wishlist_add(text: str) -> dict | None:
         if not groq_client:
             return None
         response = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=_no_think([
+            model="qwen/qwen3.6-27b",
+            messages=[
                 {
                     "role": "system",
                     "content": (
@@ -201,9 +224,10 @@ async def parse_wishlist_add(text: str) -> dict | None:
                     )
                 },
                 {"role": "user", "content": text}
-            ]),
+            ],
             temperature=0.1,
-            max_tokens=100
+            max_tokens=100,
+            reasoning_effort="none"
         )
         content = _strip_think(response.choices[0].message.content)
         match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
@@ -225,23 +249,64 @@ async def generate_gift_ideas(name: str, age: int, interests: str) -> str:
             else "Интересы неизвестны — предложи универсальные варианты для этого возраста."
         )
         response = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=_no_think([
+            model="qwen/qwen3.6-27b",
+            messages=[
                 {
                     "role": "system",
                     "content": (
                         "Ты предлагаешь короткие идеи подарков на день рождения строго на русском языке. "
                         "Дай ровно 3 идеи списком, без вступлений и заключений."
-                    )
+                    ) + FORMATTING_RULE
                 },
                 {"role": "user", "content": f"Человеку исполняется {age} лет. {interests_line}"}
-            ]),
+            ],
             temperature=0.7,
-            max_tokens=150
+            max_tokens=150,
+            reasoning_effort="none"
         )
         return _strip_think(response.choices[0].message.content)
     except Exception as e:
         logging.error(f"Ошибка генерации идей подарков: {e}")
+        return ""
+
+
+async def generate_daily_message(name: str, is_minor: bool, interests: str, core: str) -> str:
+    """Короткое персонализированное сообщение дня для конкретного члена семьи."""
+    try:
+        if not groq_client:
+            return "⚠️ AI сервис временно недоступен."
+
+        context_lines = []
+        if interests:
+            context_lines.append(f"Интересы: {interests}.")
+        if core:
+            context_lines.append(f"Известные факты о человеке: {core}.")
+        context = " ".join(context_lines) if context_lines else "Личных фактов пока нет — не выдумывай их."
+
+        system_prompt = (
+            "Ты пишешь короткое (2-4 предложения), тёплое и НЕ банальное сообщение дня "
+            "для конкретного члена семьи, строго на русском языке. "
+            "Не используй штампы вроде «доброе утро», «пусть день принесёт», «мы команда», "
+            "«маленькие радости», «новые свершения» — сообщение приходит днём, а не утром. "
+            "Обращайся по имени и, если есть конкретные факты о человеке, обопрись на них, "
+            "иначе пиши по-доброму и без выдуманных деталей."
+        ) + SAFETY_RULE + FORMATTING_RULE
+        if is_minor:
+            system_prompt += MINOR_SAFETY_RULE
+
+        response = groq_client.chat.completions.create(
+            model="qwen/qwen3.6-27b",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Напиши сообщение дня для {name}. {context}"}
+            ],
+            temperature=0.8,
+            max_tokens=150,
+            reasoning_effort="none"
+        )
+        return _strip_think(response.choices[0].message.content)
+    except Exception as e:
+        logging.error(f"Ошибка генерации сообщения дня: {e}")
         return ""
 
 

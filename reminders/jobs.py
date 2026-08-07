@@ -7,14 +7,16 @@ from telegram.ext import ContextTypes
 
 from config import (
     CHAT_IDS_ALL, MOSCOW_TZ, BIRTHDAYS, EFFECT_CONFETTI,
-    WISHLIST_REMINDER_DAYS, WISHLIST_INTERESTS, NAME_TO_USER_ID
+    WISHLIST_REMINDER_DAYS, WISHLIST_INTERESTS, NAME_TO_USER_ID, USER_ID_TO_NAME,
+    MINOR_USERS, SCHOOL_SUMMER_BREAK_START, SCHOOL_SUMMER_BREAK_END
 )
 from handlers import schedule as schedule_module
 from handlers import trainings
 from reminders.personal import PERSONAL_REMINDERS, PERSONAL_REMINDERS_DYNAMIC, DAILY_REMINDERS, SMART_REMINDERS_DYNAMIC, save_smart_reminders
 from reminders.storage import load_sent_reminders, save_sent_reminders
 from reminders.wishlist import WISHLISTS
-from services.ai import groq_client, _no_think, _strip_think, generate_gift_ideas
+from services.ai import generate_gift_ideas, generate_daily_message
+from services.memory import get_core
 
 BUSY_DAY_LESSON_THRESHOLD = 7
 BUSY_DAY_LESSON_WITH_TRAINING_THRESHOLD = 5
@@ -27,6 +29,13 @@ def now_moscow():
 def should_send_notifications() -> bool:
     current_hour = now_moscow().hour
     return 13 <= current_hour < 21
+
+
+def is_school_summer_break(today: date) -> bool:
+    """Проверяет, попадает ли дата в период летних каникул (без школьного расписания)."""
+    start = date(today.year, *SCHOOL_SUMMER_BREAK_START)
+    end = date(today.year, *SCHOOL_SUMMER_BREAK_END)
+    return start <= today <= end
 
 
 async def safe_send_message(bot, chat_id, text):
@@ -117,8 +126,6 @@ async def send_training_reminders(context: ContextTypes.DEFAULT_TYPE):
 
 async def send_personal_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Проверяет персональные напоминания с точностью ±5 минут для Анны."""
-    if not should_send_notifications():
-        return
     now = now_moscow()
     current_date_str = now.strftime("%Y-%m-%d")
     sent_reminders = {entry for entry in load_sent_reminders() if entry.startswith(current_date_str)}
@@ -159,22 +166,15 @@ async def send_dynamic_reminder(context: ContextTypes.DEFAULT_TYPE):
         if reminder_id in sent_reminders:
             continue
         try:
-            if not groq_client:
+            name = USER_ID_TO_NAME.get(chat_id, "")
+            text = await generate_daily_message(
+                name=name,
+                is_minor=chat_id in MINOR_USERS,
+                interests=WISHLIST_INTERESTS.get(name, ""),
+                core=get_core(chat_id),
+            )
+            if not text:
                 text = "⚠️ AI сервис временно недоступен."
-            else:
-                response = groq_client.chat.completions.create(
-                    model="qwen/qwen3-32b",
-                    messages=_no_think([
-                        {
-                            "role": "system",
-                            "content": "Ты генерируешь короткие, позитивные, мотивационные сообщения строго на русском языке для семейного чата."
-                        },
-                        {"role": "user", "content": "/no_think Напиши мотивационное сообщение дня."}
-                    ]),
-                    temperature=0.7,
-                    max_tokens=120
-                )
-                text = _strip_think(response.choices[0].message.content)
             await safe_send_message(context.bot, chat_id, text)
             logging.info(f"Отправлено динамическое напоминание (Groq) в чат {chat_id}: {text}")
             sent_reminders.add(reminder_id)
@@ -202,7 +202,7 @@ async def send_smart_reminders(context: ContextTypes.DEFAULT_TYPE):
 
 
 def _find_trainings_for_child(child: str, day: str) -> list[str]:
-    """Ищет тренировки ребёнка на день, учитывая расхождения в написании имени (Виктор/Виктор)."""
+    """Ищет тренировки ребёнка на день, учитывая расхождения в написании имени (Виктор/Витя)."""
     for name, schedule in trainings.TRAININGS.items():
         if name.replace("ё", "е") == child.replace("ё", "е"):
             return schedule.get(day, [])
@@ -213,6 +213,9 @@ async def send_busy_day_alert(context: ContextTypes.DEFAULT_TYPE):
     """Утреннее предупреждение о загруженном дне: много уроков и/или тренировка вечером."""
     now = now_moscow()
     if not (now.hour == 8 and now.minute == 0):
+        return
+
+    if is_school_summer_break(now.date()):
         return
 
     schedule_module.load_schedule()
